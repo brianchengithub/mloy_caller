@@ -1,0 +1,19 @@
+# Ignore R workspace files
+.RData
+.Rhistory
+.Rproj.user
+
+# Ignore genomic data inputs
+*.idat
+*.bam
+*.bai
+*.cram
+*.crai
+*.vcf
+*.vcf.gz
+*.bcf
+*.cel
+*.CEL
+
+# Ignore Mac system files
+.DS_Store

@@ -1,0 +1,100 @@
+#!/bin/bash
+# ==============================================================================
+# mLOY Detector Wrapper
+# ==============================================================================
+
+# 1. Resolve Script Directory
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+R_EXEC="${DIR}/mloy_caller.R"
+
+# 2. Help Function
+show_help() {
+    echo "Usage: mloy [OPTIONS] <INPUT_PATH>"
+    echo ""
+    echo "Description:"
+    echo "  Detect Mosaic Loss of Y (mLOY) from IDAT, BAM, CRAM, VCF, or CEL files."
+    echo ""
+    echo "Wrapper Options (Pre-processing):"
+    echo "  -t, --type <STR>      Force file type check: 'meth', 'geno', 'bam', 'vcf'"
+    echo "  -q, --quiet           Suppress progress bar and status messages"
+    echo "  -h, --help            Show this help message"
+    echo ""
+    echo "Core Options (Passed to Engine):"
+    echo "  --manifest <FILE>     CSV Manifest mapping Address/Chrom/Pos (Required for Genotyping)"
+    echo "  --build <STR>         Genome build: 'GRCh38' (default) or 'GRCh37'"
+    echo "  --cores <INT>         Number of CPU cores to use (default: 4)"
+    echo "  --chunk <INT>         Files to process per RAM batch (default: 50)"
+    echo ""
+    echo "Examples:"
+    echo "  mloy /data/idats/ --cores 8"
+    echo "  mloy /data/geno/ --manifest GSA.csv --chunk 20"
+    echo "  mloy sample.bam --type bam"
+    echo ""
+}
+
+# 3. Check Dependencies
+if ! command -v Rscript &> /dev/null; then
+    echo "❌ Error: R is not installed."
+    exit 1
+fi
+
+# 4. Check for Help Flag immediately
+for arg in "$@"; do
+    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+        show_help
+        exit 0
+    fi
+done
+
+# 5. Argument Parsing (Validation Only)
+TYPE=""
+MANIFEST=""
+INPUT=""
+QUIET=false
+
+for ((i=1;i<=$#;i++)); do
+    arg="${!i}"
+    
+    if [[ "$arg" == "-t" || "$arg" == "--type" ]]; then
+        next=$((i+1)); TYPE="${!next}"
+    fi
+    if [[ "$arg" == "--manifest" ]]; then
+        next=$((i+1)); MANIFEST="${!next}"
+    fi
+    if [[ "$arg" == "-q" || "$arg" == "--quiet" ]]; then
+        QUIET=true
+    fi
+    
+    if [[ "$arg" != -* && -z "$INPUT" ]]; then
+         prev=$((i-1)); prev_arg="${!prev}"
+         if [[ ! "$prev_arg" =~ ^(-t|--type|--manifest|--build|--chunk|--cores)$ ]]; then
+            INPUT="$arg"
+         fi
+    fi
+done
+
+# 6. Pre-Flight Checks
+if [[ -n "$TYPE" ]]; then
+    if [[ "$TYPE" == "geno" && -z "$MANIFEST" ]]; then
+        echo "❌ ERROR: You specified '--type geno' but missed the manifest."
+        echo "   Solution: Add '--manifest <csv_file>'."
+        exit 1
+    fi
+    
+    if [[ "$TYPE" == "bam" && -f "$INPUT" ]]; then
+        if [[ ! -f "${INPUT}.bai" && ! -f "${INPUT%.*}.bai" ]]; then
+            if [ "$QUIET" = false ]; then
+                echo "⚠️  WARNING: BAM index missing. Processing will be slow."
+            fi
+        fi
+    fi
+fi
+
+# 7. Execute R Script
+exec Rscript "$R_EXEC" "$@"
