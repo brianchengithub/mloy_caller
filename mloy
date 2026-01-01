@@ -3,6 +3,10 @@
 # mLOY Detector Wrapper
 # ==============================================================================
 
+# Disable macOS fork safety check to allow R parallel processing
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+
+
 # 1. Resolve Script Directory
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do

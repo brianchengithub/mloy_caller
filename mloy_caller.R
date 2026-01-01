@@ -63,7 +63,7 @@ process_meth <- function(file_path, build, ...) {
     y_sig  <- median(ints[y_mask], na.rm=TRUE)
     
     return(c(y_sig, auto_sig))
-  }, error = function(e) return(NULL))
+}, error = function(e) { message(paste("❌ FAIL:", basename(file_path), "-", e)); return(NULL) })
 }
 
 process_geno <- function(file_path, build, manifest_dt, ...) {
