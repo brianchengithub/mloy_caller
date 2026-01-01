@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 
 # ==============================================================================
-# mLOY Caller (v1.4 - Web Manifest Fallback)
+# mLOY Caller (v1.6 - GitHub Manifests)
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -36,27 +36,37 @@ update_progress <- function(current, total) {
   if (current == total) cat("\n", file = stderr())
 }
 
-# --- Manifest Downloader ---
+# --- Manifest Downloader (User-Provided GitHub URLs) ---
 download_manifest <- function(platform, build_key) {
-    # Official URLs from zwdzwd.github.io/InfiniumAnnotation
-    base_url <- "https://zwdzwd.github.io/InfiniumAnnotation/20210630"
+    # Pattern: https://github.com/zhou-lab/InfiniumAnnotationV1/raw/main/Anno/{PLATFORM}/{PLATFORM}.{BUILD}.manifest.tsv.gz
+    base_url <- "https://github.com/zhou-lab/InfiniumAnnotationV1/raw/main/Anno"
     filename <- paste0(platform, ".", build_key, ".manifest.tsv.gz")
     url <- paste(base_url, platform, filename, sep="/")
     
-    # Cache location in tempdir to avoid re-downloading per file
+    # Cache location
     tmp_file <- file.path(tempdir(), filename)
     
-    if (!file.exists(tmp_file)) {
+    # Download if missing or empty
+    if (!file.exists(tmp_file) || file.size(tmp_file) < 1000) {
         message(paste0("   ➜ Downloading manifest from: ", url))
         tryCatch({
+            options(timeout=300) # 5 min timeout
             download.file(url, tmp_file, quiet=TRUE)
         }, error = function(e) {
-            stop("Failed to download manifest. Please check internet connection.")
+            stop(paste0("Failed to download manifest for ", platform, "/", build_key, ".\nURL: ", url))
         })
     }
     
-    # Read TSV and convert to GRanges
-    dt <- fread(tmp_file, select=c("probeID", "CpG_chrm", "CpG_beg"))
+    # Read & Validate
+    tryCatch({
+        # Read standard columns (compatible with zhou-lab format)
+        dt <- fread(tmp_file, select=c("probeID", "CpG_chrm", "CpG_beg"))
+    }, error = function(e) {
+        # Fallback for alternative headers
+        dt <- fread(tmp_file, select=c("Probe_ID", "chrm", "start"))
+        setnames(dt, c("Probe_ID", "chrm", "start"), c("probeID", "CpG_chrm", "CpG_beg"))
+    })
+
     # Filter out missing coordinates
     dt <- dt[!is.na(CpG_beg) & !is.na(CpG_chrm)]
     
@@ -87,7 +97,7 @@ process_meth <- function(file_path, build, ...) {
         # Try local sesameData first
         sesameDataGet(man_key)
     }, error = function(e) {
-        # Fallback: Download from web
+        # Fallback: Download from GitHub
         return(download_manifest(platform, build_key))
     })
     
@@ -97,7 +107,6 @@ process_meth <- function(file_path, build, ...) {
     # 3. Intersect and Extract Signals
     common <- intersect(names(intensities), names(probes_gr))
     
-    # Validation Check
     if(length(common) < 1000) {
        stop(paste("Low probe overlap (<1000). Platform:", platform, 
                   "Manifest Size:", length(probes_gr), 
