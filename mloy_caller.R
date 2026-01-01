@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 
 # ==============================================================================
-# mLOY Caller (v1.2 - Robust Manifest Support)
+# mLOY Caller (v1.3 - Force Manifest Retrieval)
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -10,6 +10,8 @@ suppressPackageStartupMessages({
   library(data.table)
   library(dplyr)
   library(GenomicRanges)
+  library(sesame)      # Load explicitly at top
+  library(sesameData)  # Load explicitly at top
 })
 
 # --- Genome Constants ---
@@ -39,30 +41,28 @@ update_progress <- function(current, total) {
 # ==============================================================================
 
 process_meth <- function(file_path, build, ...) {
-  suppressPackageStartupMessages(library(sesame))
+  # Note: sesame libraries loaded globally now
   prefix <- sub("_(Grn|Red).idat$", "", file_path, ignore.case = TRUE)
+  
   tryCatch({
     # 1. Read Intensity Data
     intensities <- totalIntensities(noob(readIDATpair(prefix)))
     platform <- attr(intensities, "platform") 
     if (is.null(platform)) platform <- "EPIC"
     
-    # 2. Resolve Manifest (Robust Fallback Logic)
+    # 2. Resolve Manifest (Direct Retrieval Strategy)
     build_key <- ifelse(build=="GRCh37", "hg19", "hg38")
+    
+    # Strategy A: Standard Manifest
     man_key <- paste0(platform, ".", build_key, ".manifest")
     
-    # Check if standard manifest exists; if not, look for KYCG alternative
-    if (!man_key %in% sesameDataList()) {
-        # Fallback for newer sesameData versions
+    probes_gr <- tryCatch({
+        sesameDataGet(man_key)
+    }, error = function(e) {
+        # Strategy B: Fallback to KYCG (Force retrieval, skip list check)
         alt_key <- paste0("KYCG.", platform, ".chromosome.", build_key, ".20210630")
-        if (alt_key %in% sesameDataList()) {
-            man_key <- alt_key
-        } else {
-            stop(paste("No manifest found for", platform, build_key))
-        }
-    }
-    
-    probes_gr <- sesameDataGet(man_key)
+        return(sesameDataGet(alt_key))
+    })
     
     # Handle GRangesList (e.g. if KYCG returns a list of chromosomes)
     if (is(probes_gr, "GRangesList")) {
@@ -71,7 +71,11 @@ process_meth <- function(file_path, build, ...) {
     
     # 3. Intersect and Extract Signals
     common <- intersect(names(intensities), names(probes_gr))
-    if(length(common) < 100) return(NULL)
+    
+    # If intersection is low, we might have the wrong platform/manifest
+    if(length(common) < 100) {
+       stop(paste("Low probe overlap (<100). Platform:", platform, "Manifest:", length(probes_gr)))
+    }
     
     seqs <- as.character(seqnames(probes_gr[common]))
     ints <- intensities[common]
@@ -85,6 +89,7 @@ process_meth <- function(file_path, build, ...) {
     y_sig  <- median(ints[y_mask], na.rm=TRUE)
     
     return(c(y_sig, auto_sig))
+    
   }, error = function(e) { 
       message(paste0("\n❌ FAIL: ", basename(file_path), " -> ", e$message))
       return(NULL) 
