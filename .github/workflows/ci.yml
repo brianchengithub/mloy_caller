@@ -1,0 +1,95 @@
+name: mLOY Pipeline CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  test-pipeline:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # --- 1. System Dependency Setup ---
+      - name: Install System Tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bcftools samtools libcurl4-openssl-dev
+
+      - name: Install System Tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bcftools samtools
+
+      # --- 2. R Environment Setup ---
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+          use-public-rspm: true
+
+      - name: Cache R Packages
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-r-${{ hashFiles('install_deps.R') }}
+          restore-keys: ${{ runner.os }}-r-
+
+      - name: Install R Dependencies
+        run: Rscript install_deps.R
+
+      # --- 3. Synthetic Data Generation ---
+      - name: Create Synthetic Test VCF
+        run: |
+          # Create a minimal VCF with required FORMAT/DP fields to pass audit
+          echo '##fileformat=VCFv4.2' > test_sample.vcf
+          echo '##FILTER=<ID=PASS,Description="All filters passed">' >> test_sample.vcf
+          echo '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">' >> test_sample.vcf
+          echo '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">' >> test_sample.vcf
+          echo '##contig=<ID=chrY,length=57227415>' >> test_sample.vcf
+          echo '##contig=<ID=chr20,length=64444167>' >> test_sample.vcf
+          echo -e "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE001" >> test_sample.vcf
+          # Add a fake variant on Y (PAR region) and 20
+          echo -e "chrY\t2781480\t.\tG\tA\t100\tPASS\t.\tGT:DP\t0/1:50" >> test_sample.vcf
+          echo -e "chr20\t100000\t.\tC\tT\t100\tPASS\t.\tGT:DP\t0/1:50" >> test_sample.vcf
+          
+          # Compress to .vcf.gz (Required by pipeline)
+          bgzip test_sample.vcf
+          tabix -p vcf test_sample.vcf.gz
+
+      # --- 4. Pipeline Execution ---
+      - name: Run mLOY Setup & Analysis
+        run: |
+          # Mock the reference download to save time/bandwidth (Optional but recommended for CI)
+          # We create a fake reference so genome_audit.sh doesn't try to download 3GB
+          mkdir -p $HOME/.genomics_assets
+          echo ">chrY" > $HOME/.genomics_assets/hg38.fa
+          echo "NNNNNNNNNN" >> $HOME/.genomics_assets/hg38.fa
+          samtools faidx $HOME/.genomics_assets/hg38.fa
+          gzip -c $HOME/.genomics_assets/hg38.fa > $HOME/.genomics_assets/hg38.fa.gz
+
+          # Run the pipeline
+          chmod +x mloy_setup.sh
+          ./mloy_setup.sh test_sample.vcf.gz > ci_results.tsv
+
+      # --- 5. Verify Results ---
+      - name: Check Output
+        run: |
+          cat ci_results.tsv
+          # Fail if the file is empty or only has a header
+          if [ $(wc -l < ci_results.tsv) -le 1 ]; then
+            echo "❌ Test Failed: Output file is empty or missing data."
+            exit 1
+          else
+            echo "✅ Test Passed: Data row generated."
+          fi
