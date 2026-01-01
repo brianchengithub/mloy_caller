@@ -51,26 +51,28 @@ get_manifest <- function(platform, build_key) {
         tryCatch({
             options(timeout=600)
             download.file(url, tmp_file, quiet=TRUE)
-        }, error = function(e) stop("Failed to download manifest. Check internet."))
+        }, error = function(e) stop("Failed to download manifest. Check internet connection."))
     }
     
     # 3. Read & Standardize Columns
-    # We read just the header first to check column names
+    # Check header first
     header <- names(fread(tmp_file, nrows=0))
     
-    # Map user columns to standard internal names
     col_map <- list()
+    # Map Probe ID
     if ("Probe_ID" %in% header) col_map[["Probe_ID"]] <- "probeID"
     else if ("probeID" %in% header) col_map[["probeID"]] <- "probeID"
     
+    # Map Chromosome
     if ("CpG_chrm" %in% header) col_map[["CpG_chrm"]] <- "seqnames"
     else if ("chrm" %in% header) col_map[["chrm"]] <- "seqnames"
     
+    # Map Start Position
     if ("CpG_beg" %in% header) col_map[["CpG_beg"]] <- "start"
     else if ("start" %in% header) col_map[["start"]] <- "start"
     
     # Validation
-    if (length(col_map) < 3) stop("Manifest missing required columns (Probe_ID, CpG_chrm, CpG_beg)")
+    if (length(col_map) < 3) stop(paste("Manifest missing required columns. Found:", paste(header, collapse=", ")))
     
     # Read Data
     dt <- fread(tmp_file, select=names(col_map))
@@ -100,7 +102,7 @@ process_meth <- function(file_path, build, probes_gr, ...) {
     
     # Safety Check
     if(length(common) < 1000) {
-       return(NULL) # Fail silently for workers to keep logs clean, count as error later
+       return(NULL) 
     }
     
     # 3. Extract Signals
@@ -124,8 +126,7 @@ process_meth <- function(file_path, build, probes_gr, ...) {
   })
 }
 
-# ... (process_geno, process_bam, process_vcf, process_cel remain unchanged) ...
-# (They are rarely used in this context, keeping them brief for the file limit)
+# Placeholders for other types to maintain script integrity
 process_geno <- function(f, b, m) { return(NULL) } 
 process_bam <- function(f, b) { return(NULL) }
 process_vcf <- function(f, b) { return(NULL) }
@@ -211,6 +212,18 @@ main <- function() {
       if (grepl("idat", ext)) {
         if (!is.null(meth_manifest)) res <- process_meth(f, args$build, meth_manifest)
       } 
-      # (Other types skipped for brevity in this fix, can restore if needed)
       
-      if (!is.null(res))
+      if (!is.null(res)) return(calculate_metrics(res[1], res[2], basename(f), args$build))
+      return(NULL)
+    }, mc.cores = args$cores)
+    
+    for (r in results) { if (!is.null(r)) cat(r, "\n") }
+    
+    processed_count <- processed_count + length(chunk_files)
+    if(!args$quiet) update_progress(processed_count, total_files)
+    
+    rm(results); gc(verbose=FALSE)
+  }
+}
+
+if (!interactive()) main()
