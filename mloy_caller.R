@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 
 # ==============================================================================
-# mLOY Caller (v1.0)
+# mLOY Caller
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -42,6 +42,7 @@ process_meth <- function(file_path, build, ...) {
   suppressPackageStartupMessages(library(sesame))
   prefix <- sub("_(Grn|Red).idat$", "", file_path, ignore.case = TRUE)
   tryCatch({
+    # readIDATpair automatically reads BOTH Green and Red files
     intensities <- totalIntensities(noob(readIDATpair(prefix)))
     platform <- attr(intensities, "platform") 
     if (is.null(platform)) platform <- "EPIC"
@@ -63,7 +64,11 @@ process_meth <- function(file_path, build, ...) {
     y_sig  <- median(ints[y_mask], na.rm=TRUE)
     
     return(c(y_sig, auto_sig))
-}, error = function(e) { message(paste("❌ FAIL:", basename(file_path), "-", e)); return(NULL) })
+  }, error = function(e) { 
+      # Print error to stderr so we can see why it fails
+      message(paste0("\n❌ FAIL: ", basename(file_path), " -> ", e$message))
+      return(NULL) 
+  })
 }
 
 process_geno <- function(file_path, build, manifest_dt, ...) {
@@ -154,7 +159,6 @@ calculate_metrics <- function(y, auto, id, build) {
 main <- function() {
   parser <- ArgumentParser(description="mLOY Detector")
   parser$add_argument("input", help="Input Directory or File")
-  # --- CHANGE: Default set to GRCh38 ---
   parser$add_argument("--build", default="GRCh38", help="Genome Build (default: GRCh38)")
   
   parser$add_argument("--cores", default=4, type="integer")
@@ -170,6 +174,10 @@ main <- function() {
   } else { files <- args$input }
   
   files <- files[grepl("\\.(idat|bam|cram|vcf|bcf|vcf\\.gz|cel)$", files, ignore.case=TRUE)]
+  
+  # --- FILTER: Exclude Red files to prevent double-processing pairs ---
+  files <- files[!grepl("_Red.idat$", files, ignore.case=TRUE)]
+  
   if (length(files) == 0) stop("No supported files found.")
   
   # 2. Manifest Loading
