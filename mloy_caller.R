@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 
 # ==============================================================================
-# mLOY Caller  
+# mLOY Caller (v2.0 - Persistent Caching)
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -35,28 +35,37 @@ update_progress <- function(current, total) {
   if (current == total) cat("\n", file = stderr())
 }
 
-# --- Manifest Handler ---
+# --- Persistent Manifest Handler ---
 get_manifest_dt <- function(platform, build_key) {
-    # 1. Construct URL (GitHub raw link)
-    base_url <- "https://github.com/zhou-lab/InfiniumAnnotationV1/raw/main/Anno"
+    # 1. Define Cache Directory (~/.mloy_cache)
+    cache_dir <- file.path(Sys.getenv("HOME"), ".mloy_cache")
+    if (!dir.exists(cache_dir)) dir.create(cache_dir)
+    
     filename <- paste0(platform, ".", build_key, ".manifest.tsv.gz")
-    url <- paste(base_url, platform, filename, sep="/")
+    local_file <- file.path(cache_dir, filename)
     
-    tmp_file <- file.path(tempdir(), filename)
-    
-    # 2. Download (Blocking - Single Thread)
-    if (!file.exists(tmp_file) || file.size(tmp_file) < 1000) {
-        message(paste0("➜ Downloading manifest: ", url))
+    # 2. Check Local Cache First
+    if (file.exists(local_file) && file.size(local_file) > 1000) {
+        if (!interactive()) message(paste0("➜ Using cached manifest: ", local_file))
+    } else {
+        # 3. Download if missing
+        base_url <- "https://github.com/zhou-lab/InfiniumAnnotationV1/raw/main/Anno"
+        url <- paste(base_url, platform, filename, sep="/")
+        
+        message(paste0("➜ Downloading manifest to cache: ", url))
         tryCatch({
             options(timeout=600)
-            download.file(url, tmp_file, quiet=TRUE)
-        }, error = function(e) stop("Failed to download manifest. Check internet connection."))
+            download.file(url, local_file, quiet=TRUE)
+        }, error = function(e) {
+            unlink(local_file) # Clean up partial file
+            stop("Failed to download manifest. Check internet connection.")
+        })
     }
     
-    # 3. Read & Standardize Columns
-    header <- names(fread(tmp_file, nrows=0))
-    
+    # 4. Read & Standardize
+    header <- names(fread(local_file, nrows=0))
     col_map <- list()
+    
     if ("Probe_ID" %in% header) col_map[["Probe_ID"]] <- "Probe_ID"
     else if ("probeID" %in% header) col_map[["probeID"]] <- "Probe_ID"
     
@@ -68,15 +77,15 @@ get_manifest_dt <- function(platform, build_key) {
     
     if (length(col_map) < 3) stop(paste("Manifest missing required columns. Found:", paste(header, collapse=", ")))
     
-    # Read as simple Data Table
-    dt <- fread(tmp_file, select=names(col_map))
+    # Read optimized
+    dt <- fread(local_file, select=names(col_map))
     setnames(dt, names(col_map), unlist(col_map))
     
-    # Filter valid rows
+    # Filter
     dt <- dt[!is.na(Start) & !is.na(Chrom)]
-    setkey(dt, Probe_ID) # Optimizes search
+    setkey(dt, Probe_ID)
     
-    message(paste0("➜ Manifest loaded: ", nrow(dt), " probes."))
+    if (!interactive()) message(paste0("➜ Manifest loaded: ", nrow(dt), " probes."))
     return(dt)
 }
 
@@ -92,13 +101,12 @@ process_meth <- function(file_path, build, manifest_dt, ...) {
     intensities <- totalIntensities(noob(readIDATpair(prefix)))
     idat_names <- names(intensities)
     
-    # 2. Intersect (Using Data Table logic - Fast & Safe)
+    # 2. Intersect
     common_ids <- intersect(idat_names, manifest_dt$Probe_ID)
     
     # --- DEBUGGING SAFETY NET ---
-    if(length(common_ids) < 1000) {
-       return(NULL)
-    }
+    if(length(common_ids) < 1000) return(NULL)
+    # ----------------------------
 
     # 3. Filter Data
     sub_man <- manifest_dt[common_ids, on="Probe_ID"]
@@ -134,11 +142,9 @@ calculate_metrics <- function(y, auto, id, build) {
   ratio <- y / auto
   lrr   <- log2(ratio / 0.5)
   
-  # --- CORRECTED FORMULA (Haploid Loss) ---
-  # Before: 2 * (1 - 2^lrr)  <-- Incorrect (for Autosomal loss)
-  # Now:    1 - 2^lrr        <-- Correct (for Y loss)
+  # --- CORRECTED FORMULA ---
   cf    <- max(0, min(1, 1 - (2^lrr)))
-  # ----------------------------------------
+  # -------------------------
   
   type <- "Undetermined"; gender <- "U"
   if (lrr < -0.2) { type <- "Loss"; gender <- "M" }
