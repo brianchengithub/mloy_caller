@@ -9,7 +9,6 @@ suppressPackageStartupMessages({
   library(parallel)
   library(data.table)
   library(dplyr)
-  library(GenomicRanges)
   library(sesame)
   library(sesameData)
 })
@@ -37,7 +36,7 @@ update_progress <- function(current, total) {
 }
 
 # --- Manifest Handler ---
-get_manifest <- function(platform, build_key) {
+get_manifest_dt <- function(platform, build_key) {
     # 1. Construct URL (GitHub raw link)
     base_url <- "https://github.com/zhou-lab/InfiniumAnnotationV1/raw/main/Anno"
     filename <- paste0(platform, ".", build_key, ".manifest.tsv.gz")
@@ -55,68 +54,75 @@ get_manifest <- function(platform, build_key) {
     }
     
     # 3. Read & Standardize Columns
-    # Check header first
     header <- names(fread(tmp_file, nrows=0))
     
     col_map <- list()
-    # Map Probe ID
-    if ("Probe_ID" %in% header) col_map[["Probe_ID"]] <- "probeID"
-    else if ("probeID" %in% header) col_map[["probeID"]] <- "probeID"
+    if ("Probe_ID" %in% header) col_map[["Probe_ID"]] <- "Probe_ID"
+    else if ("probeID" %in% header) col_map[["probeID"]] <- "Probe_ID"
     
-    # Map Chromosome
-    if ("CpG_chrm" %in% header) col_map[["CpG_chrm"]] <- "seqnames"
-    else if ("chrm" %in% header) col_map[["chrm"]] <- "seqnames"
+    if ("CpG_chrm" %in% header) col_map[["CpG_chrm"]] <- "Chrom"
+    else if ("chrm" %in% header) col_map[["chrm"]] <- "Chrom"
     
-    # Map Start Position
-    if ("CpG_beg" %in% header) col_map[["CpG_beg"]] <- "start"
-    else if ("start" %in% header) col_map[["start"]] <- "start"
+    if ("CpG_beg" %in% header) col_map[["CpG_beg"]] <- "Start"
+    else if ("start" %in% header) col_map[["start"]] <- "Start"
     
-    # Validation
     if (length(col_map) < 3) stop(paste("Manifest missing required columns. Found:", paste(header, collapse=", ")))
     
-    # Read Data
+    # Read as simple Data Table
     dt <- fread(tmp_file, select=names(col_map))
     setnames(dt, names(col_map), unlist(col_map))
     
-    # Filter & Convert
-    dt <- dt[!is.na(start) & !is.na(seqnames)]
-    gr <- GRanges(seqnames = dt$seqnames, ranges = IRanges(start = dt$start, width = 1), names = dt$probeID)
+    # Filter valid rows
+    dt <- dt[!is.na(Start) & !is.na(Chrom)]
+    setkey(dt, Probe_ID) # Optimizes search
     
-    message(paste0("➜ Manifest loaded: ", length(gr), " probes."))
-    return(gr)
+    message(paste0("➜ Manifest loaded: ", nrow(dt), " probes."))
+    return(dt)
 }
 
 # ==============================================================================
 # Worker Functions
 # ==============================================================================
 
-process_meth <- function(file_path, build, probes_gr, ...) {
+process_meth <- function(file_path, build, manifest_dt, ...) {
   prefix <- sub("_(Grn|Red).idat$", "", file_path, ignore.case = TRUE)
   
   tryCatch({
-    # 1. Read Intensity (Using sesame)
+    # 1. Read Intensity
     intensities <- totalIntensities(noob(readIDATpair(prefix)))
+    idat_names <- names(intensities)
     
-    # 2. Intersect (Fast set operation)
-    common <- intersect(names(intensities), names(probes_gr))
+    # 2. Intersect (Using Data Table logic - Fast & Safe)
+    # We only care about probes that exist in BOTH
+    common_ids <- intersect(idat_names, manifest_dt$Probe_ID)
     
-    # Safety Check
-    if(length(common) < 1000) {
-       return(NULL) 
+    # --- DEBUGGING SAFETY NET ---
+    if(length(common_ids) < 1000) {
+       msg <- paste0("❌ ERROR: Low Overlap (", length(common_ids), " matches). ",
+                     "IDAT Example: ", head(idat_names, 1), 
+                     " vs Manifest Example: ", head(manifest_dt$Probe_ID, 1))
+       message(msg)
+       return(NULL)
     }
+    # ----------------------------
+
+    # 3. Filter Data
+    # Subset Manifest to only common probes
+    sub_man <- manifest_dt[common_ids, on="Probe_ID"]
     
-    # 3. Extract Signals
-    seqs <- as.character(seqnames(probes_gr[common]))
-    ints <- intensities[common]
-    pos  <- start(probes_gr[common])
-    
-    # 4. Compute Median Signals
-    auto_mask <- grep("^(chr)?(1[0-9]?|2[0-2]?|[3-9])$", seqs)
-    auto_sig  <- median(ints[auto_mask], na.rm=TRUE)
+    # Subset Intensities to only common probes
+    sub_ints <- intensities[common_ids]
+
+    # 4. Calculate Signals
+    auto_mask <- grepl("^(chr)?(1[0-9]?|2[0-2]?|[3-9])$", sub_man$Chrom)
+    auto_sig  <- median(sub_ints[auto_mask], na.rm=TRUE)
     
     r <- GENOME_RULES[[build]]
-    y_mask <- which(seqs %in% r$Y_LABELS & pos >= r$Y_NONPAR_START & pos <= r$Y_NONPAR_END)
-    y_sig  <- median(ints[y_mask], na.rm=TRUE)
+    y_mask <- (sub_man$Chrom %in% r$Y_LABELS & 
+               sub_man$Start >= r$Y_NONPAR_START & 
+               sub_man$Start <= r$Y_NONPAR_END)
+               
+    y_sig  <- median(sub_ints[y_mask], na.rm=TRUE)
     
     return(c(y_sig, auto_sig))
     
@@ -126,7 +132,7 @@ process_meth <- function(file_path, build, probes_gr, ...) {
   })
 }
 
-# Placeholders for other types to maintain script integrity
+# Placeholders
 process_geno <- function(f, b, m) { return(NULL) } 
 process_bam <- function(f, b) { return(NULL) }
 process_vcf <- function(f, b) { return(NULL) }
@@ -166,20 +172,17 @@ main <- function() {
   } else { files <- args$input }
   
   files <- files[grepl("\\.(idat|bam|cram|vcf|bcf|vcf\\.gz|cel)$", files, ignore.case=TRUE)]
-  # Exclude Red files
   files <- files[!grepl("_Red.idat$", files, ignore.case=TRUE)]
   
   if (length(files) == 0) stop("No supported files found.")
   
-  # 2. Pre-Flight: Detect Platform & Download Manifest (ONCE)
-  # We peek at the first IDAT file to determine the platform
+  # 2. Pre-Flight
   first_idat <- files[grep("idat", files)][1]
-  meth_manifest <- NULL
+  meth_manifest_dt <- NULL
   
   if (!is.na(first_idat)) {
       if(!args$quiet) message("Detecting platform from first sample...")
       suppressMessages({
-          # Read just header/intensities to get attr
           tmp_dat <- sesame::readIDATpair(sub("_(Grn|Red).idat$", "", first_idat, ignore.case=TRUE))
           tmp_int <- sesame::totalIntensities(sesame::noob(tmp_dat))
           platform <- attr(tmp_int, "platform")
@@ -187,9 +190,8 @@ main <- function() {
       })
       if(!args$quiet) message(paste0("Platform detected: ", platform))
       
-      # Download/Load Manifest BEFORE parallel loop
       build_key <- ifelse(args$build=="GRCh37", "hg19", "hg38")
-      meth_manifest <- get_manifest(platform, build_key)
+      meth_manifest_dt <- get_manifest_dt(platform, build_key)
   }
 
   # 3. Execution
@@ -210,7 +212,7 @@ main <- function() {
       res <- NULL
       
       if (grepl("idat", ext)) {
-        if (!is.null(meth_manifest)) res <- process_meth(f, args$build, meth_manifest)
+        if (!is.null(meth_manifest_dt)) res <- process_meth(f, args$build, meth_manifest_dt)
       } 
       
       if (!is.null(res)) return(calculate_metrics(res[1], res[2], basename(f), args$build))
