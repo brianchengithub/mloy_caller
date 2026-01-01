@@ -166,7 +166,7 @@ main <- function() {
   
   # 1. File Discovery
   if (dir.exists(args$input)) {
-    files <- list.files(args$input, full.names=TRUE, recursive=FALSE)
+    files <- list.files(args$input, full.names=TRUE, recursive=TRUE)
   } else { files <- args$input }
   
   files <- files[grepl("\\.(idat|bam|cram|vcf|bcf|vcf\\.gz|cel)$", files, ignore.case=TRUE)]
