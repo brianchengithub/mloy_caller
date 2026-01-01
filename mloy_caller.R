@@ -93,24 +93,15 @@ process_meth <- function(file_path, build, manifest_dt, ...) {
     idat_names <- names(intensities)
     
     # 2. Intersect (Using Data Table logic - Fast & Safe)
-    # We only care about probes that exist in BOTH
     common_ids <- intersect(idat_names, manifest_dt$Probe_ID)
     
     # --- DEBUGGING SAFETY NET ---
     if(length(common_ids) < 1000) {
-       msg <- paste0("❌ ERROR: Low Overlap (", length(common_ids), " matches). ",
-                     "IDAT Example: ", head(idat_names, 1), 
-                     " vs Manifest Example: ", head(manifest_dt$Probe_ID, 1))
-       message(msg)
        return(NULL)
     }
-    # ----------------------------
 
     # 3. Filter Data
-    # Subset Manifest to only common probes
     sub_man <- manifest_dt[common_ids, on="Probe_ID"]
-    
-    # Subset Intensities to only common probes
     sub_ints <- intensities[common_ids]
 
     # 4. Calculate Signals
@@ -142,7 +133,13 @@ calculate_metrics <- function(y, auto, id, build) {
   if (is.null(y) || is.na(auto) || auto == 0) return(NULL)
   ratio <- y / auto
   lrr   <- log2(ratio / 0.5)
-  cf    <- max(0, min(1, 2 * (1 - (2^lrr))))
+  
+  # --- CORRECTED FORMULA (Haploid Loss) ---
+  # Before: 2 * (1 - 2^lrr)  <-- Incorrect (for Autosomal loss)
+  # Now:    1 - 2^lrr        <-- Correct (for Y loss)
+  cf    <- max(0, min(1, 1 - (2^lrr)))
+  # ----------------------------------------
+  
   type <- "Undetermined"; gender <- "U"
   if (lrr < -0.2) { type <- "Loss"; gender <- "M" }
   else if (lrr > -0.15 && lrr < 0.15) { type <- "Normal"; gender <- "M" }
