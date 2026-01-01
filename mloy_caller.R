@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 
 # ==============================================================================
-# mLOY Caller (v1.3 - Force Manifest Retrieval)
+# mLOY Caller (v1.4 - Web Manifest Fallback)
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -10,8 +10,8 @@ suppressPackageStartupMessages({
   library(data.table)
   library(dplyr)
   library(GenomicRanges)
-  library(sesame)      # Load explicitly at top
-  library(sesameData)  # Load explicitly at top
+  library(sesame)
+  library(sesameData)
 })
 
 # --- Genome Constants ---
@@ -36,12 +36,41 @@ update_progress <- function(current, total) {
   if (current == total) cat("\n", file = stderr())
 }
 
+# --- Manifest Downloader ---
+download_manifest <- function(platform, build_key) {
+    # Official URLs from zwdzwd.github.io/InfiniumAnnotation
+    base_url <- "https://zwdzwd.github.io/InfiniumAnnotation/20210630"
+    filename <- paste0(platform, ".", build_key, ".manifest.tsv.gz")
+    url <- paste(base_url, platform, filename, sep="/")
+    
+    # Cache location in tempdir to avoid re-downloading per file
+    tmp_file <- file.path(tempdir(), filename)
+    
+    if (!file.exists(tmp_file)) {
+        message(paste0("   ➜ Downloading manifest from: ", url))
+        tryCatch({
+            download.file(url, tmp_file, quiet=TRUE)
+        }, error = function(e) {
+            stop("Failed to download manifest. Please check internet connection.")
+        })
+    }
+    
+    # Read TSV and convert to GRanges
+    dt <- fread(tmp_file, select=c("probeID", "CpG_chrm", "CpG_beg"))
+    # Filter out missing coordinates
+    dt <- dt[!is.na(CpG_beg) & !is.na(CpG_chrm)]
+    
+    gr <- GRanges(seqnames = dt$CpG_chrm, 
+                  ranges = IRanges(start = dt$CpG_beg, width = 1),
+                  names = dt$probeID)
+    return(gr)
+}
+
 # ==============================================================================
 # Worker Functions
 # ==============================================================================
 
 process_meth <- function(file_path, build, ...) {
-  # Note: sesame libraries loaded globally now
   prefix <- sub("_(Grn|Red).idat$", "", file_path, ignore.case = TRUE)
   
   tryCatch({
@@ -50,31 +79,29 @@ process_meth <- function(file_path, build, ...) {
     platform <- attr(intensities, "platform") 
     if (is.null(platform)) platform <- "EPIC"
     
-    # 2. Resolve Manifest (Direct Retrieval Strategy)
+    # 2. Resolve Manifest
     build_key <- ifelse(build=="GRCh37", "hg19", "hg38")
-    
-    # Strategy A: Standard Manifest
     man_key <- paste0(platform, ".", build_key, ".manifest")
     
     probes_gr <- tryCatch({
+        # Try local sesameData first
         sesameDataGet(man_key)
     }, error = function(e) {
-        # Strategy B: Fallback to KYCG (Force retrieval, skip list check)
-        alt_key <- paste0("KYCG.", platform, ".chromosome.", build_key, ".20210630")
-        return(sesameDataGet(alt_key))
+        # Fallback: Download from web
+        return(download_manifest(platform, build_key))
     })
     
-    # Handle GRangesList (e.g. if KYCG returns a list of chromosomes)
-    if (is(probes_gr, "GRangesList")) {
-        probes_gr <- unlist(probes_gr)
-    }
+    # Handle GRangesList if necessary
+    if (is(probes_gr, "GRangesList")) probes_gr <- unlist(probes_gr)
     
     # 3. Intersect and Extract Signals
     common <- intersect(names(intensities), names(probes_gr))
     
-    # If intersection is low, we might have the wrong platform/manifest
-    if(length(common) < 100) {
-       stop(paste("Low probe overlap (<100). Platform:", platform, "Manifest:", length(probes_gr)))
+    # Validation Check
+    if(length(common) < 1000) {
+       stop(paste("Low probe overlap (<1000). Platform:", platform, 
+                  "Manifest Size:", length(probes_gr), 
+                  "Overlap:", length(common)))
     }
     
     seqs <- as.character(seqnames(probes_gr[common]))
