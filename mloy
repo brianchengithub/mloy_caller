@@ -3,11 +3,11 @@
 # mLOY Detector Wrapper
 # ==============================================================================
 
-# Disable macOS fork safety check to allow R parallel processing
+# 1. ENVIRONMENT SAFEGUARDS
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+export R_PARALLEL_PORT=11000
 
-
-# 1. Resolve Script Directory
+# 2. Resolve Script Directory (Robust)
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
@@ -17,7 +17,7 @@ done
 DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 R_EXEC="${DIR}/mloy_caller.R"
 
-# 2. Help Function
+# 3. Help Function
 show_help() {
     echo "Usage: mloy [OPTIONS] <INPUT_PATH>"
     echo ""
@@ -35,28 +35,22 @@ show_help() {
     echo "  --cores <INT>         Number of CPU cores to use (default: 4)"
     echo "  --chunk <INT>         Files to process per RAM batch (default: 50)"
     echo ""
-    echo "Examples:"
-    echo "  mloy /data/idats/ --cores 8"
-    echo "  mloy /data/geno/ --manifest GSA.csv --chunk 20"
-    echo "  mloy sample.bam --type bam"
-    echo ""
 }
 
-# 3. Check Dependencies
+# 4. Check Dependencies
 if ! command -v Rscript &> /dev/null; then
     echo "❌ Error: R is not installed."
     exit 1
 fi
 
-# 4. Check for Help Flag immediately
+# 5. Check for Help Flag
 for arg in "$@"; do
     if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
-        show_help
-        exit 0
+        show_help; exit 0
     fi
 done
 
-# 5. Argument Parsing (Validation Only)
+# 6. Argument Parsing
 TYPE=""
 MANIFEST=""
 INPUT=""
@@ -64,16 +58,9 @@ QUIET=false
 
 for ((i=1;i<=$#;i++)); do
     arg="${!i}"
-    
-    if [[ "$arg" == "-t" || "$arg" == "--type" ]]; then
-        next=$((i+1)); TYPE="${!next}"
-    fi
-    if [[ "$arg" == "--manifest" ]]; then
-        next=$((i+1)); MANIFEST="${!next}"
-    fi
-    if [[ "$arg" == "-q" || "$arg" == "--quiet" ]]; then
-        QUIET=true
-    fi
+    if [[ "$arg" == "-t" || "$arg" == "--type" ]]; then next=$((i+1)); TYPE="${!next}"; fi
+    if [[ "$arg" == "--manifest" ]]; then next=$((i+1)); MANIFEST="${!next}"; fi
+    if [[ "$arg" == "-q" || "$arg" == "--quiet" ]]; then QUIET=true; fi
     
     if [[ "$arg" != -* && -z "$INPUT" ]]; then
          prev=$((i-1)); prev_arg="${!prev}"
@@ -83,22 +70,19 @@ for ((i=1;i<=$#;i++)); do
     fi
 done
 
-# 6. Pre-Flight Checks
+# 7. Pre-Flight Checks
 if [[ -n "$TYPE" ]]; then
     if [[ "$TYPE" == "geno" && -z "$MANIFEST" ]]; then
         echo "❌ ERROR: You specified '--type geno' but missed the manifest."
         echo "   Solution: Add '--manifest <csv_file>'."
         exit 1
     fi
-    
     if [[ "$TYPE" == "bam" && -f "$INPUT" ]]; then
         if [[ ! -f "${INPUT}.bai" && ! -f "${INPUT%.*}.bai" ]]; then
-            if [ "$QUIET" = false ]; then
-                echo "⚠️  WARNING: BAM index missing. Processing will be slow."
-            fi
+            if [ "$QUIET" = false ]; then echo "⚠️  WARNING: BAM index missing. Processing will be slow."; fi
         fi
     fi
 fi
 
-# 7. Execute R Script
+# 8. Execute R Script
 exec Rscript "$R_EXEC" "$@"
